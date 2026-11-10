@@ -1,0 +1,6 @@
+/imap-readonly-proxy
+/bin/
+config.toml
+*.pem
+remote-password
+testdata/fuzz/

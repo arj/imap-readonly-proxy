@@ -1,0 +1,33 @@
+# imap-readonly-proxy example configuration.
+# Keep this file private (chmod 600): it contains upstream credentials.
+
+[server]
+# Implicit TLS (IMAPS) for clients. Recommended.
+listen   = "0.0.0.0:993"
+tls_cert = "/etc/imap-readonly-proxy/cert.pem"
+tls_key  = "/etc/imap-readonly-proxy/key.pem"
+
+# Alternative for a proxy that is only reachable from the same host:
+# listen = "127.0.0.1:1143"
+# insecure_plaintext = true
+
+# max_connections        = 64
+# max_connections_per_ip = 8
+
+[[accounts]]
+local_user          = "reader"
+# Generate with: imap-readonly-proxy hash-password
+local_password_hash = "$2a$12$REPLACE_WITH_BCRYPT_HASH"
+
+remote_host     = "imap.example.org"
+remote_security = "tls"            # tls (993) | starttls (143) | insecure-plaintext (loopback only)
+# remote_port   = 993
+# remote_tls_server_name = "imap.example.org"
+# remote_ca_file = "/etc/ssl/private-ca.pem"
+remote_user          = "me@example.org"
+remote_password_file = "/etc/imap-readonly-proxy/remote-password"
+
+# Optional: show only these folders (and their children).
+allowed_folders = ["INBOX", "Archive"]
+# Or hide specific folders instead (mutually exclusive with allowed_folders):
+# blocked_folders = ["Private"]

@@ -1,0 +1,33 @@
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)"
+      - run: make vet
+      - run: make test
+      - run: FUZZTIME=60s make fuzz
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+  e2e:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - run: apt-get update && apt-get install -y --no-install-recommends dovecot-imapd ca-certificates git make sudo
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: run e2e as unprivileged user
+        run: |
+          useradd -m tester
+          chown -R tester .
+          sudo -u tester env PATH="$PATH" HOME=/home/tester GOCACHE=/home/tester/.cache/go GOPATH=/home/tester/go ./test/e2e/run.sh
