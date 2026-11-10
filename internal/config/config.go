@@ -2,6 +2,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -17,12 +19,48 @@ import (
 // Config is the top-level configuration.
 type Config struct {
 	Server   Server    `toml:"server"`
+	HTTP     HTTP      `toml:"http"`
 	Accounts []Account `toml:"accounts"`
+}
+
+// HTTP configures the optional read-only REST API. It is disabled when
+// Listen is empty.
+type HTTP struct {
+	// Enabled switches the REST endpoint on or off. If unset, the endpoint
+	// is enabled when Listen is set.
+	Enabled *bool  `toml:"enabled"`
+	Listen  string `toml:"listen"`
+	// TLSCert and TLSKey enable HTTPS. They may be the same files as
+	// server.tls_cert/tls_key.
+	TLSCert string `toml:"tls_cert"`
+	TLSKey  string `toml:"tls_key"`
+	// InsecurePlaintext allows plain HTTP on a loopback address only.
+	InsecurePlaintext bool `toml:"insecure_plaintext"`
+
+	MaxConcurrentRequests      int   `toml:"max_concurrent_requests"`
+	MaxConcurrentRequestsPerIP int   `toml:"max_concurrent_requests_per_ip"`
+	MaxMessageBytes            int64 `toml:"max_message_bytes"`
+}
+
+// Enabled reports whether the REST API is configured.
+func (h *HTTP) IsEnabled() bool { return switchedOn(h.Enabled, h.Listen) }
+
+// IMAPEnabled reports whether the IMAP listener is configured.
+func (s *Server) IMAPEnabled() bool { return switchedOn(s.Enabled, s.Listen) }
+
+func switchedOn(enabled *bool, listen string) bool {
+	if enabled != nil {
+		return *enabled
+	}
+	return listen != ""
 }
 
 // Server configures the client-facing listener.
 type Server struct {
-	Listen string `toml:"listen"`
+	// Enabled switches the IMAP endpoint on or off. If unset, the endpoint
+	// is enabled when Listen is set.
+	Enabled *bool  `toml:"enabled"`
+	Listen  string `toml:"listen"`
 	// TLSCert and TLSKey enable implicit TLS (IMAPS) for clients.
 	TLSCert string `toml:"tls_cert"`
 	TLSKey  string `toml:"tls_key"`
@@ -37,7 +75,10 @@ type Server struct {
 // Account maps one local login to one upstream mailbox.
 type Account struct {
 	LocalUser         string `toml:"local_user"`
-	LocalPasswordHash string `toml:"local_password_hash"` // bcrypt
+	LocalPasswordHash string `toml:"local_password_hash"` // bcrypt; enables IMAP login
+	// APITokenSHA256 is the hex SHA-256 of the REST API bearer token
+	// (see "imap-readonly-proxy generate-token"); enables REST access.
+	APITokenSHA256 string `toml:"api_token_sha256"`
 
 	RemoteHost          string `toml:"remote_host"`
 	RemotePort          int    `toml:"remote_port"`
@@ -79,28 +120,44 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (c *Config) validate() error {
-	s := &c.Server
-	if s.Listen == "" {
-		return errors.New("server.listen is required")
-	}
-	host, _, err := net.SplitHostPort(s.Listen)
+func validateListener(section, listen, cert, key string, plaintext bool) error {
+	host, _, err := net.SplitHostPort(listen)
 	if err != nil {
-		return fmt.Errorf("server.listen: %w", err)
+		return fmt.Errorf("%s.listen: %w", section, err)
 	}
-	hasTLS := s.TLSCert != "" || s.TLSKey != ""
-	if hasTLS && (s.TLSCert == "" || s.TLSKey == "") {
-		return errors.New("server.tls_cert and server.tls_key must both be set")
+	hasTLS := cert != "" || key != ""
+	if hasTLS && (cert == "" || key == "") {
+		return fmt.Errorf("%s.tls_cert and %s.tls_key must both be set", section, section)
 	}
-	if hasTLS && s.InsecurePlaintext {
-		return errors.New("server.insecure_plaintext cannot be combined with TLS")
+	if hasTLS && plaintext {
+		return fmt.Errorf("%s.insecure_plaintext cannot be combined with TLS", section)
 	}
 	if !hasTLS {
-		if !s.InsecurePlaintext {
-			return errors.New("server: configure tls_cert/tls_key, or set insecure_plaintext = true for a loopback listener")
+		if !plaintext {
+			return fmt.Errorf("%s: configure tls_cert/tls_key, or set insecure_plaintext = true for a loopback listener", section)
 		}
 		if !isLoopbackHost(host) {
-			return errors.New("server.insecure_plaintext requires a loopback listen address")
+			return fmt.Errorf("%s.insecure_plaintext requires a loopback listen address", section)
+		}
+	}
+	return nil
+}
+
+func (c *Config) validate() error {
+	s := &c.Server
+	h := &c.HTTP
+	if !s.IMAPEnabled() && !h.IsEnabled() {
+		return errors.New("both endpoints are switched off: enable [server] (IMAP) and/or [http] (REST)")
+	}
+	if s.IMAPEnabled() && s.Listen == "" {
+		return errors.New("server.enabled = true requires server.listen")
+	}
+	if h.IsEnabled() && h.Listen == "" {
+		return errors.New("http.enabled = true requires http.listen")
+	}
+	if s.IMAPEnabled() {
+		if err := validateListener("server", s.Listen, s.TLSCert, s.TLSKey, s.InsecurePlaintext); err != nil {
+			return err
 		}
 	}
 	if s.MaxConnections == 0 {
@@ -112,6 +169,23 @@ func (c *Config) validate() error {
 	if s.MaxConnections < 0 || s.MaxConnectionsPerIP < 0 {
 		return errors.New("server connection limits must be positive")
 	}
+	if h.IsEnabled() {
+		if err := validateListener("http", h.Listen, h.TLSCert, h.TLSKey, h.InsecurePlaintext); err != nil {
+			return err
+		}
+	}
+	if h.MaxConcurrentRequests == 0 {
+		h.MaxConcurrentRequests = 16
+	}
+	if h.MaxConcurrentRequestsPerIP == 0 {
+		h.MaxConcurrentRequestsPerIP = 4
+	}
+	if h.MaxMessageBytes == 0 {
+		h.MaxMessageBytes = 25 << 20
+	}
+	if h.MaxConcurrentRequests < 0 || h.MaxConcurrentRequestsPerIP < 0 || h.MaxMessageBytes < 0 || h.MaxMessageBytes > 1<<30 {
+		return errors.New("http limits out of range")
+	}
 
 	if len(c.Accounts) == 0 {
 		return errors.New("at least one [[accounts]] entry is required")
@@ -119,7 +193,7 @@ func (c *Config) validate() error {
 	seen := map[string]bool{}
 	for i := range c.Accounts {
 		a := &c.Accounts[i]
-		if err := a.validate(); err != nil {
+		if err := a.validate(s.IMAPEnabled(), h.IsEnabled()); err != nil {
 			return fmt.Errorf("accounts[%d] (%q): %w", i, a.LocalUser, err)
 		}
 		if seen[a.LocalUser] {
@@ -130,12 +204,23 @@ func (c *Config) validate() error {
 	return nil
 }
 
-func (a *Account) validate() error {
+func (a *Account) validate(imapOn, httpOn bool) error {
 	if a.LocalUser == "" {
 		return errors.New("local_user is required")
 	}
-	if _, err := bcrypt.Cost([]byte(a.LocalPasswordHash)); err != nil {
-		return errors.New("local_password_hash must be a bcrypt hash (use: imap-readonly-proxy hash-password)")
+	if !(imapOn && a.LocalPasswordHash != "") && !(httpOn && a.APITokenSHA256 != "") {
+		return errors.New("account cannot be used: set local_password_hash (IMAP endpoint) or api_token_sha256 (REST endpoint) for an enabled endpoint")
+	}
+	if a.LocalPasswordHash != "" {
+		if _, err := bcrypt.Cost([]byte(a.LocalPasswordHash)); err != nil {
+			return errors.New("local_password_hash must be a bcrypt hash (use: imap-readonly-proxy hash-password)")
+		}
+	}
+	if a.APITokenSHA256 != "" {
+		b, err := hex.DecodeString(a.APITokenSHA256)
+		if err != nil || len(b) != sha256.Size {
+			return errors.New("api_token_sha256 must be 64 hex characters (use: imap-readonly-proxy generate-token)")
+		}
 	}
 	if a.RemoteHost == "" || a.RemoteUser == "" {
 		return errors.New("remote_host and remote_user are required")

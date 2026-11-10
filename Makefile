@@ -10,5 +10,8 @@ test:
 	$(GO) test -race ./...
 fuzz:
 	$(GO) test ./internal/policy -run '^$$' -fuzz FuzzPolicy -fuzztime $${FUZZTIME:-60s}
+	$(GO) test ./internal/restapi -run '^$$' -fuzz '^FuzzParseResponse$$' -fuzztime $${FUZZTIME_SHORT:-20s}
+	$(GO) test ./internal/restapi -run '^$$' -fuzz '^FuzzParseMessage$$' -fuzztime $${FUZZTIME_SHORT:-20s}
+	$(GO) test ./internal/restapi -run '^$$' -fuzz '^FuzzMailboxUTF7$$' -fuzztime $${FUZZTIME_SHORT:-20s}
 e2e:
 	./test/e2e/run.sh

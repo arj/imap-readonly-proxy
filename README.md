@@ -1,6 +1,7 @@
 # imap-readonly-proxy
 
-An IMAP proxy that gives clients **read-only** access to an upstream mailbox.
+An IMAP proxy and HTTPS REST API that give clients **read-only** access to
+an upstream mailbox.
 It is built for servers that cannot provide a read-only account or ACL
 themselves, for example to give a mail-processing tool, an AI agent or a
 backup job access to a mailbox without the ability to change it.
@@ -34,6 +35,93 @@ Supported commands: `CAPABILITY`, `NOOP`, `LOGOUT`, `LOGIN`, `SELECT`,
 `UNSELECT` are only offered if the upstream server supports them. `LITERAL+`
 is offered to clients.
 
+## Endpoints
+
+The proxy has two independent endpoints. Each can be switched on or off:
+
+| Endpoint | Section | Switch off |
+|---|---|---|
+| IMAP (implicit TLS, port 993) | `[server]` | `enabled = false` or no `listen` |
+| HTTPS REST API (JSON) | `[http]` | `enabled = false` or no `listen` |
+
+- A switched-off section is not validated, so its settings can stay in the
+  file.
+- The proxy refuses to start if both endpoints are off.
+- Every account needs credentials for at least one enabled endpoint:
+  - IMAP: `local_password_hash`
+  - REST: `api_token_sha256`
+- On startup, the log shows which endpoints are listening and which are
+  switched off.
+
+## REST API
+
+Each REST request is translated into IMAP commands and checked by the same
+policy as IMAP clients. The API can therefore never write, set `\Seen` or
+open hidden folders. See [ADR 0002](docs/adr/0002-rest-api.md).
+
+Create a token, add the printed `api_token_sha256` line to the account, and
+give the token to the client:
+
+```sh
+imap-readonly-proxy generate-token
+curl -H "Authorization: Bearer irp_..." https://imap-proxy.example.org:8443/api/v1/mailboxes
+```
+
+All endpoints are `GET` (other methods get 405). Mailbox names are UTF-8
+and must be percent-encoded in the path, including `/` (`%2F`).
+
+| Path | Result |
+|---|---|
+| `/healthz` | `{"status":"ok"}`, without authentication |
+| `/api/v1/mailboxes` | Visible mailboxes (`name`, `delimiter`, `flags`) |
+| `/api/v1/mailboxes/{mailbox}` | `messages`, `unseen`, `uidnext`, `uidvalidity` |
+| `/api/v1/mailboxes/{mailbox}/messages` | Message summaries, newest first |
+| `/api/v1/mailboxes/{mailbox}/messages/{uid}` | Decoded message: headers, `text`, `html`, `attachments` |
+| `/api/v1/mailboxes/{mailbox}/messages/{uid}/raw` | Original message (`message/rfc822`, as download) |
+| `/api/v1/mailboxes/{mailbox}/messages/{uid}/attachments/{index}` | Decoded attachment (`application/octet-stream`, as download) |
+
+Query parameters for `/messages`:
+
+- **Filters**, combined with AND:
+  - `from`, `to`, `cc`, `subject`, `body`, `text`: substring match; UTF-8
+    is allowed.
+  - `since`, `before`, `on`: `YYYY-MM-DD`.
+  - `unseen`, `flagged`: `true` or `false`.
+- **Pagination:**
+  - `limit`: 1 to 200, default 50.
+  - `before_uid`: pass the `next_before_uid` from the previous page.
+- Unknown parameters get 400.
+
+Example response for `/messages?limit=1`:
+
+```json
+{
+  "mailbox": "INBOX", "uidvalidity": 1794340000, "total": 3,
+  "messages": [{
+    "uid": 3, "flags": [], "internal_date": "2026-11-09T10:00:00+01:00", "size": 245,
+    "subject": "Message 3 Grüße", "from": [{"address": "a@example.com"}],
+    "to": [{"address": "b@example.com"}], "date": "2026-11-09T10:00:00+01:00",
+    "message_id": "<m3@example.com>"
+  }],
+  "next_before_uid": 3
+}
+```
+
+Errors are JSON (`{"error": "..."}`):
+
+| Status | Meaning |
+|---|---|
+| 400 | Invalid input |
+| 401 | Missing or wrong token |
+| 404 | Unknown or hidden mailbox or message |
+| 405 | Method other than GET |
+| 413 | Message larger than `max_message_bytes` |
+| 429 | Too many failed attempts or concurrent requests |
+| 502 | Upstream server unavailable |
+
+Each request opens its own upstream connection, so every request includes
+a TLS handshake and LOGIN to the upstream server.
+
 ## Usage
 
 ```sh
@@ -46,6 +134,8 @@ cp config.example.toml config.toml && chmod 600 config.toml   # then edit
 Configuration (see [config.example.toml](config.example.toml)):
 
 - Unknown keys are rejected.
+- `[server]` (IMAP) and `[http]` (REST) can each be switched off; see
+  [Endpoints](#endpoints).
 - The client listener needs `tls_cert`/`tls_key` (implicit TLS). This is
   the proxy's own server certificate; see [TLS certificates](#tls-certificates).
   Plaintext is only allowed on a loopback address.
@@ -59,14 +149,15 @@ There are two TLS connections:
 
 | Connection | Configured by | Purpose |
 |---|---|---|
-| Client to proxy | `[server]` `tls_cert`, `tls_key` | The proxy's own server certificate and private key, presented to IMAP clients (like any IMAPS server on port 993). |
+| Client to proxy | `[server]` and `[http]` `tls_cert`, `tls_key` (may be the same files) | The proxy's own server certificate and private key, presented to IMAP clients (like any IMAPS server on port 993). |
 | Proxy to upstream | `remote_security`, optional `remote_ca_file`, `remote_tls_server_name` | Verifies the upstream server's certificate. The proxy presents no certificate upstream. |
 
 The certificate is not used to authenticate anyone, and the proxy does not
 ask clients for certificates. Authentication is by password on both sides:
 
-- Clients log in to the proxy with `local_user` and the password matching
-  `local_password_hash`.
+- IMAP clients log in to the proxy with `local_user` and the password
+  matching `local_password_hash`. REST clients send a bearer token matching
+  `api_token_sha256`.
 - The proxy logs in upstream with `remote_user` and `remote_password` (or
   `remote_password_file`).
 
@@ -195,6 +286,9 @@ These are deliberate, to keep the attack surface small:
   loopback.
 - No `COMPRESS`, `ENABLE`, `CONDSTORE`/`QRESYNC`, `SORT`/`THREAD`,
   `BINARY`, `NOTIFY` or `ID`.
+- The REST API has no push or IDLE; clients poll. It does not trust
+  `X-Forwarded-For`, so behind a reverse proxy all clients share one IP
+  for rate limiting.
 - No writable folders. The upstream credentials still have write access,
   so a read-only account or ACL on the server remains the stronger control
   where one is available.

@@ -52,6 +52,14 @@ func (b *Builder) String(s []byte) *Builder {
 	return b
 }
 
+// Literal appends s as a literal.
+func (b *Builder) Literal(s []byte) *Builder {
+	b.parts = append(b.parts, Part{Text: b.cur})
+	b.parts = append(b.parts, Part{IsLiteral: true, Literal: append([]byte(nil), s...)})
+	b.cur = nil
+	return b
+}
+
 // Number appends a decimal number.
 func (b *Builder) Number(n uint64) *Builder {
 	b.cur = strconv.AppendUint(b.cur, n, 10)

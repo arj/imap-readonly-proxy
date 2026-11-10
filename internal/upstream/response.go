@@ -143,12 +143,21 @@ func (resp *Response) Stream(r *bufio.Reader, w io.Writer) error {
 	return nil
 }
 
+// ErrTooLarge is returned when a buffered response exceeds its limit.
+var ErrTooLarge = errors.New("buffered response too large")
+
 // Buffer reads the full response (including the first line) into memory,
 // bounded by MaxBufferedResponse.
 func (resp *Response) Buffer(r *bufio.Reader) ([]byte, error) {
+	return resp.BufferMax(r, MaxBufferedResponse)
+}
+
+// BufferMax is Buffer with an explicit limit. On ErrTooLarge the
+// connection is no longer usable.
+func (resp *Response) BufferMax(r *bufio.Reader, max int64) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.Write(resp.First)
-	lw := &limitedWriter{w: &buf, n: MaxBufferedResponse}
+	lw := &limitedWriter{w: &buf, n: max}
 	if err := resp.Stream(r, lw); err != nil {
 		return nil, err
 	}
@@ -162,7 +171,7 @@ type limitedWriter struct {
 
 func (l *limitedWriter) Write(p []byte) (int, error) {
 	if int64(len(p)) > l.n {
-		return 0, fmt.Errorf("%w: buffered response too large", ErrProtocol)
+		return 0, fmt.Errorf("%w: %w", ErrProtocol, ErrTooLarge)
 	}
 	l.n -= int64(len(p))
 	return l.w.Write(p)

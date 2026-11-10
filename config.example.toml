@@ -2,7 +2,9 @@
 # Keep this file private: it contains upstream credentials. With the Debian
 # package use mode 0640, owner root, group imap-readonly-proxy; otherwise 0600.
 
+# IMAP endpoint. Switch it off with enabled = false (or by omitting listen).
 [server]
+# enabled = true
 # Implicit TLS (IMAPS) for clients. Recommended.
 # tls_cert/tls_key are the proxy's OWN server certificate and private key,
 # presented to IMAP clients. They do not authenticate anyone, and they are
@@ -19,10 +21,28 @@ tls_key  = "/etc/imap-readonly-proxy/key.pem"
 # max_connections        = 64
 # max_connections_per_ip = 8
 
+# HTTPS REST API (read-only, JSON). Switch it off with enabled = false (or
+# by omitting listen). The certificate may be the same as for [server].
+[http]
+# enabled = true
+listen   = "0.0.0.0:8443"
+tls_cert = "/etc/imap-readonly-proxy/cert.pem"
+tls_key  = "/etc/imap-readonly-proxy/key.pem"
+# Alternative for clients on the same host only:
+# listen = "127.0.0.1:8080"
+# insecure_plaintext = true
+# max_concurrent_requests        = 16
+# max_concurrent_requests_per_ip = 4
+# max_message_bytes              = 26214400   # 25 MiB
+
 [[accounts]]
 local_user          = "reader"
-# Generate with: imap-readonly-proxy hash-password
+# IMAP login (needed if [server] is enabled). Generate with:
+#   imap-readonly-proxy hash-password
 local_password_hash = "$2a$12$REPLACE_WITH_BCRYPT_HASH"
+# REST bearer token (needed if [http] is enabled). Generate with:
+#   imap-readonly-proxy generate-token
+api_token_sha256 = "REPLACE_WITH_64_HEX_CHARACTERS"
 
 remote_host     = "imap.example.org"
 # Upstream connection: the proxy verifies the server's certificate (system

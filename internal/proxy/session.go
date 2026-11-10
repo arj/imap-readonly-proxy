@@ -210,10 +210,12 @@ func (s *session) login(req *policy.Request) error {
 	}
 	acct := s.srv.cfg.Lookup(req.User)
 	hash := dummyHash
-	if acct != nil {
+	if acct != nil && acct.LocalPasswordHash != "" {
 		hash = []byte(acct.LocalPasswordHash)
 	}
-	if bcrypt.CompareHashAndPassword(hash, []byte(req.Pass)) != nil || acct == nil {
+	// Accounts without local_password_hash are REST-only: always fail,
+	// after the same bcrypt work as for unknown users.
+	if bcrypt.CompareHashAndPassword(hash, []byte(req.Pass)) != nil || acct == nil || acct.LocalPasswordHash == "" {
 		s.srv.limiter.Failure(s.ip)
 		s.fails++
 		s.log.Warn("login failed")

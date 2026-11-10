@@ -2,7 +2,7 @@
 
 ## Security goal
 
-Clients authenticated by the proxy can read messages and folder metadata of
+Clients authenticated by the proxy (via IMAP or the REST API) can read messages and folder metadata of
 the configured upstream account, limited to the configured folders. They must
 not be able to change any upstream state: flags (including `\Seen`), messages,
 folders, subscriptions, ACLs, metadata or quotas.

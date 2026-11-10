@@ -77,3 +77,56 @@ func TestFolderVisible(t *testing.T) {
 		}
 	}
 }
+
+const tokenHash = "aa0e0ab2e7bb4c1b8d2c2c6a3df4d3a4d0b8e4f2b4c8f0e6a1b2c3d4e5f60718"
+
+func loadCfg(t *testing.T, body string) (*Config, error) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "c.toml")
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Load(p)
+}
+
+func TestEndpointSwitches(t *testing.T) {
+	imap := "[server]\nlisten = \"127.0.0.1:1143\"\ninsecure_plaintext = true\n"
+	rest := "[http]\nlisten = \"127.0.0.1:8080\"\ninsecure_plaintext = true\n"
+	both := account + "api_token_sha256 = \"" + tokenHash + "\"\n"
+	tokenOnly := strings.Replace(both, "local_password_hash = \""+testHash+"\"\n", "", 1)
+	tests := []struct {
+		name           string
+		body           string
+		imapOn, httpOn bool
+		wantErr        string
+	}{
+		{"imap only (implicit)", imap + account, true, false, ""},
+		{"rest only (implicit)", rest + tokenOnly, false, true, ""},
+		{"both", imap + rest + both, true, true, ""},
+		{"imap switched off", strings.Replace(imap, "[server]\n", "[server]\nenabled = false\n", 1) + rest + both, false, true, ""},
+		{"rest switched off", imap + strings.Replace(rest, "[http]\n", "[http]\nenabled = false\n", 1) + both, true, false, ""},
+		{"both switched off", strings.Replace(imap, "[server]\n", "[server]\nenabled = false\n", 1) +
+			strings.Replace(rest, "[http]\n", "[http]\nenabled = false\n", 1) + both, false, false, "both endpoints are switched off"},
+		{"nothing configured", account, false, false, "both endpoints are switched off"},
+		{"enabled without listen", "[http]\nenabled = true\n" + imap + both, false, false, "requires http.listen"},
+		{"switched-off section not validated", imap + "[http]\nenabled = false\nlisten = \":8080\"\n" + account, true, false, ""},
+		{"token account but rest off", imap + tokenOnly, false, false, "account cannot be used"},
+		{"password account but imap off", rest + account, false, false, "account cannot be used"},
+	}
+	for _, tt := range tests {
+		cfg, err := loadCfg(t, tt.body)
+		if tt.wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("%s: want error %q, got %v", tt.name, tt.wantErr, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", tt.name, err)
+			continue
+		}
+		if cfg.Server.IMAPEnabled() != tt.imapOn || cfg.HTTP.IsEnabled() != tt.httpOn {
+			t.Errorf("%s: imap=%v http=%v, want %v %v", tt.name, cfg.Server.IMAPEnabled(), cfg.HTTP.IsEnabled(), tt.imapOn, tt.httpOn)
+		}
+	}
+}
