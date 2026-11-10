@@ -156,7 +156,7 @@ There are two TLS connections:
 | Connection | Configured by | Purpose |
 |---|---|---|
 | Client to proxy | `[server]` and `[http]` `tls_cert`, `tls_key` (may be the same files) | The proxy's own server certificate and private key, presented to IMAP clients (like any IMAPS server on port 993). |
-| Proxy to upstream | `remote_security`, optional `remote_ca_file`, `remote_tls_server_name` | Verifies the upstream server's certificate. The proxy presents no certificate upstream. |
+| Proxy to upstream | `remote_security`, optional `remote_ca_file`, `remote_tls_server_name`, `remote_tls_cert_sha256` | Verifies the upstream server's certificate (see [Upstream server with a self-signed certificate](#upstream-server-with-a-self-signed-certificate)). The proxy presents no certificate upstream. |
 
 The certificate is not used to authenticate anyone, and the proxy does not
 ask clients for certificates. Authentication is by password on both sides:
@@ -218,6 +218,55 @@ protection against interception. The certificate expires after 825 days,
 so create a new one before then. For several hosts, a small private CA
 (for example with `step-ca` or `mkcert`) is easier to manage than
 individual self-signed certificates.
+
+### Upstream server with a self-signed certificate
+
+By default the proxy verifies the upstream certificate against the system
+CAs, checks that it is valid for `remote_host` (or
+`remote_tls_server_name`) and has not expired. A self-signed certificate
+fails this check, and the proxy does not log in. There are two ways to
+accept one, without disabling verification:
+
+1. **CA file:** set `remote_ca_file` to the server's certificate (PEM). This
+   only works if the certificate lists the name the proxy connects to in
+   `subjectAltName` (a certificate with only a Common Name is rejected) and
+   has not expired. Set `remote_tls_server_name` if `remote_host` is an IP
+   address that is not in the certificate.
+2. **Pin:** set `remote_tls_cert_sha256` to the SHA-256 fingerprint of the
+   server's certificate. The proxy then accepts exactly this certificate,
+   regardless of issuer, names and expiry, and rejects every other one.
+   This works for any self-signed certificate, for example the default
+   certificate of a NAS. When the server
+   gets a new certificate, the connection fails until you update the pin.
+
+The `upstream-cert` subcommand connects to the server, shows its
+certificate and prints the line to pin it. It does not send credentials:
+
+```sh
+imap-readonly-proxy upstream-cert -host 192.168.1.20 -port 993
+imap-readonly-proxy upstream-cert -host 192.168.1.20 -port 143 -security starttls
+```
+
+```
+certificate:
+  subject:  CN=localhost
+  ...
+  sha256:   AC:C8:F4:9F:...:7A:F7:5E
+
+verification: FAILED (x509: certificate signed by unknown authority)
+remote_tls_cert_sha256 = "AC:C8:F4:9F:...:7A:F7:5E"
+```
+
+Before pinning, compare the fingerprint with the certificate on the server
+itself, because the first connection could already be intercepted:
+
+```sh
+openssl x509 -in /etc/dovecot/private/dovecot.pem -noout -fingerprint -sha256
+```
+
+The pin accepts hex with or without colons, in either case. It cannot be
+combined with `remote_ca_file`. See
+[ADR 0003](docs/adr/0003-upstream-certificate-pinning.md).
 
 ### Proxy only reachable from the same host
 

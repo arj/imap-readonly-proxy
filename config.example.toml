@@ -46,11 +46,16 @@ api_token_sha256 = "REPLACE_WITH_64_HEX_CHARACTERS"
 
 remote_host     = "imap.example.org"
 # Upstream connection: the proxy verifies the server's certificate (system
-# CAs, or remote_ca_file) and logs in with remote_user/remote_password.
+# CAs, remote_ca_file or remote_tls_cert_sha256) and logs in with
+# remote_user/remote_password.
 remote_security = "tls"            # tls (993) | starttls (143) | insecure-plaintext (loopback only)
 # remote_port   = 993
 # remote_tls_server_name = "imap.example.org"
 # remote_ca_file = "/etc/ssl/private-ca.pem"  # only to verify the upstream server
+# Self-signed upstream certificate: pin it instead (mutually exclusive with
+# remote_ca_file). Get the value with:
+#   imap-readonly-proxy upstream-cert -host imap.example.org
+# remote_tls_cert_sha256 = "AB:CD:...:EF"
 remote_user          = "me@example.org"
 remote_password_file = "/etc/imap-readonly-proxy/remote-password"
 

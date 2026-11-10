@@ -14,6 +14,9 @@ folders, subscriptions, ACLs, metadata or quotas.
 - A malicious or compromised upstream server (the proxy limits response sizes
   but trusts response content).
 - Denial of service beyond the built-in connection, size and time limits.
+- Interception of the upstream connection if a `remote_tls_cert_sha256`
+  pin was taken from an intercepted connection without comparing it with
+  the server's certificate.
 - Confidentiality of the client connection when `insecure_plaintext` is used
   (allowed only on loopback).
 

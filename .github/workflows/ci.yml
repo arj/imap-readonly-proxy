@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
-      - run: apt-get update && apt-get install -y --no-install-recommends dovecot-imapd ca-certificates git make sudo
+      - run: apt-get update && apt-get install -y --no-install-recommends dovecot-imapd ca-certificates git make openssl sudo
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:

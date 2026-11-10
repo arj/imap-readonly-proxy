@@ -31,6 +31,7 @@ remote_password = "x"
 `
 
 func TestValidation(t *testing.T) {
+	const srv = "[server]\nlisten = \"127.0.0.1:1143\"\ninsecure_plaintext = true\n"
 	tests := []struct {
 		name, body, wantErr string
 	}{
@@ -46,6 +47,12 @@ func TestValidation(t *testing.T) {
 			"allowed_folders = [\"*\"]\n", "wildcards"},
 		{"both filters", "[server]\nlisten = \"127.0.0.1:1143\"\ninsecure_plaintext = true\n" + account +
 			"allowed_folders = [\"INBOX\"]\nblocked_folders = [\"Secret\"]\n", "mutually exclusive"},
+		{"cert pin colons", srv + account + "remote_tls_cert_sha256 = \"AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB\"\n", ""},
+		{"cert pin plain hex", srv + account + "remote_tls_cert_sha256 = \"abababababababababababababababababababababababababababababababab\"\n", ""},
+		{"cert pin too short", srv + account + "remote_tls_cert_sha256 = \"ABCD\"\n", "SHA-256"},
+		{"cert pin and ca file", srv + account + "remote_tls_cert_sha256 = \"AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB\"\nremote_ca_file = \"/x.pem\"\n", "mutually exclusive"},
+		{"cert pin plaintext", srv + strings.Replace(strings.Replace(account, `"tls"`, `"insecure-plaintext"`, 1), "imap.example.org", "127.0.0.1", 1) +
+			"remote_tls_cert_sha256 = \"AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB:AB\"\n", "requires"},
 	}
 	for _, tt := range tests {
 		err := load(t, tt.body)

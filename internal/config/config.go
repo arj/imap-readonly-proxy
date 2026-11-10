@@ -85,6 +85,11 @@ type Account struct {
 	RemoteSecurity      string `toml:"remote_security"` // tls | starttls | insecure-plaintext
 	RemoteTLSServerName string `toml:"remote_tls_server_name"`
 	RemoteCAFile        string `toml:"remote_ca_file"`
+	// RemoteTLSCertSHA256 pins the upstream leaf certificate (SHA-256 of
+	// the DER encoding, as printed by "openssl x509 -fingerprint
+	// -sha256" or "imap-readonly-proxy upstream-cert"). For self-signed
+	// certificates; replaces CA, host name and expiry checks.
+	RemoteTLSCertSHA256 string `toml:"remote_tls_cert_sha256"`
 	RemoteUser          string `toml:"remote_user"`
 	RemotePassword      string `toml:"remote_password"`
 	RemotePasswordFile  string `toml:"remote_password_file"`
@@ -244,6 +249,17 @@ func (a *Account) validate(imapOn, httpOn bool) error {
 	default:
 		return errors.New("remote_security must be \"tls\", \"starttls\" or \"insecure-plaintext\"")
 	}
+	if a.RemoteTLSCertSHA256 != "" {
+		if upstream.Security(a.RemoteSecurity) == upstream.SecurityInsecurePlaintext {
+			return errors.New("remote_tls_cert_sha256 requires remote_security = \"tls\" or \"starttls\"")
+		}
+		if a.RemoteCAFile != "" {
+			return errors.New("remote_tls_cert_sha256 and remote_ca_file are mutually exclusive")
+		}
+		if _, err := upstream.ParseFingerprint(a.RemoteTLSCertSHA256); err != nil {
+			return fmt.Errorf("remote_tls_cert_sha256 %w", err)
+		}
+	}
 	if a.RemotePort < 1 || a.RemotePort > 65535 {
 		return errors.New("remote_port out of range")
 	}
@@ -279,7 +295,17 @@ func (a *Account) Endpoint() upstream.Endpoint {
 		Security:      upstream.Security(a.RemoteSecurity),
 		TLSServerName: a.RemoteTLSServerName,
 		CAFile:        a.RemoteCAFile,
+		CertSHA256:    a.certPin(),
 	}
+}
+
+// certPin returns the parsed certificate pin (validated by Load).
+func (a *Account) certPin() []byte {
+	if a.RemoteTLSCertSHA256 == "" {
+		return nil
+	}
+	b, _ := upstream.ParseFingerprint(a.RemoteTLSCertSHA256)
+	return b
 }
 
 // Lookup returns the account for a local user name, or nil.

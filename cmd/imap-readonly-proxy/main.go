@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -21,6 +23,7 @@ import (
 	"github.com/arj/imap-readonly-proxy/internal/config"
 	"github.com/arj/imap-readonly-proxy/internal/proxy"
 	"github.com/arj/imap-readonly-proxy/internal/restapi"
+	"github.com/arj/imap-readonly-proxy/internal/upstream"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
@@ -32,6 +35,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "generate-token" {
 		os.Exit(generateToken())
+	}
+	if len(os.Args) > 1 && os.Args[1] == "upstream-cert" {
+		os.Exit(upstreamCert(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println(version)
@@ -167,5 +173,78 @@ func hashPassword() int {
 		return 1
 	}
 	fmt.Println(string(h))
+	return 0
+}
+
+// upstreamCert prints the certificate of an upstream server and the
+// remote_tls_cert_sha256 line to pin it. It sends no credentials.
+func upstreamCert(args []string) int {
+	fs := flag.NewFlagSet("upstream-cert", flag.ContinueOnError)
+	host := fs.String("host", "", "upstream host (required)")
+	port := fs.Int("port", 0, "upstream port (default 993 for tls, 143 for starttls)")
+	security := fs.String("security", "tls", "tls or starttls")
+	serverName := fs.String("servername", "", "TLS server name (default: host)")
+	caFile := fs.String("ca-file", "", "check the certificate against this CA file instead of the system CAs")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: imap-readonly-proxy upstream-cert -host HOST [-port N] [-security tls|starttls] [-servername NAME] [-ca-file FILE]")
+		fs.PrintDefaults()
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *host == "" || fs.NArg() != 0 {
+		fs.Usage()
+		return 2
+	}
+	sec := upstream.Security(*security)
+	switch sec {
+	case upstream.SecurityTLS:
+		if *port == 0 {
+			*port = 993
+		}
+	case upstream.SecurityStartTLS:
+		if *port == 0 {
+			*port = 143
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "-security must be tls or starttls")
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	info, err := upstream.ProbeCertificate(ctx, upstream.Endpoint{
+		Host: *host, Port: *port, Security: sec, TLSServerName: *serverName, CAFile: *caFile,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	for i, c := range info.Chain {
+		label := "certificate"
+		if i > 0 {
+			label = fmt.Sprintf("chain[%d]", i)
+		}
+		fmt.Printf("%s:\n  subject:  %s\n  issuer:   %s\n", label, c.Subject, c.Issuer)
+		if len(c.DNSNames) > 0 || len(c.IPAddresses) > 0 {
+			names := append([]string{}, c.DNSNames...)
+			for _, ip := range c.IPAddresses {
+				names = append(names, ip.String())
+			}
+			fmt.Printf("  names:    %s\n", strings.Join(names, ", "))
+		}
+		fmt.Printf("  valid:    %s to %s\n", c.NotBefore.UTC().Format(time.RFC3339), c.NotAfter.UTC().Format(time.RFC3339))
+		sum := sha256.Sum256(c.Raw)
+		fmt.Printf("  sha256:   %s\n", upstream.FormatFingerprint(sum[:]))
+	}
+	if info.VerifyErr == nil {
+		fmt.Println("\nverification: OK; no pin is needed.")
+		return 0
+	}
+	fmt.Printf("\nverification: FAILED (%v)\n", info.VerifyErr)
+	sum := sha256.Sum256(info.Chain[0].Raw)
+	fmt.Fprintln(os.Stderr, "\nCompare the fingerprint with the certificate on the server before pinning it, e.g.:")
+	fmt.Fprintln(os.Stderr, "  openssl x509 -in /path/to/cert.pem -noout -fingerprint -sha256")
+	fmt.Fprintln(os.Stderr, "To pin it, add this line to the [[accounts]] entry:")
+	fmt.Printf("remote_tls_cert_sha256 = %q\n", upstream.FormatFingerprint(sum[:]))
 	return 0
 }

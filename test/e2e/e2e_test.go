@@ -49,9 +49,16 @@ func TestMain(m *testing.M) {
 
 func startProxy(t *testing.T, extra string) string {
 	t.Helper()
+	port, _ := strconv.Atoi(strings.Split(upstreamAddr, ":")[1])
+	return startProxyWithUpstream(t, fmt.Sprintf("remote_port = %d\nremote_security = \"insecure-plaintext\"\n%s", port, extra))
+}
+
+// startProxyWithUpstream starts a proxy whose account has the given
+// remote_port/remote_security lines (and any extra account settings).
+func startProxyWithUpstream(t *testing.T, upstreamLines string) string {
+	t.Helper()
 	hash, _ := bcrypt.GenerateFromPassword([]byte(localPass), bcrypt.MinCost)
 	dir := t.TempDir()
-	port, _ := strconv.Atoi(strings.Split(upstreamAddr, ":")[1])
 	cfgText := fmt.Sprintf(`
 [server]
 listen = "127.0.0.1:0"
@@ -61,12 +68,10 @@ insecure_plaintext = true
 local_user = %q
 local_password_hash = %q
 remote_host = "127.0.0.1"
-remote_port = %d
-remote_security = "insecure-plaintext"
 remote_user = %q
 remote_password = %q
 %s
-`, localUser, string(hash), port, upstreamUser, upstreamPass, extra)
+`, localUser, string(hash), upstreamUser, upstreamPass, upstreamLines)
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte(cfgText), 0o600); err != nil {
 		t.Fatal(err)

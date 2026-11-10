@@ -7,8 +7,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +42,11 @@ type Endpoint struct {
 	Security      Security
 	TLSServerName string // defaults to Host
 	CAFile        string // optional; defaults to the system roots
+	// CertSHA256, if set, pins the SHA-256 of the server's leaf
+	// certificate (DER). It replaces chain, name and validity checks and
+	// is meant for self-signed certificates. Mutually exclusive with
+	// CAFile.
+	CertSHA256 []byte
 }
 
 // Timeouts used for upstream I/O.
@@ -83,6 +91,31 @@ func tlsConfig(ep Endpoint) (*tls.Config, error) {
 		name = ep.Host
 	}
 	cfg := &tls.Config{ServerName: name, MinVersion: tls.VersionTLS12}
+	if len(ep.CertSHA256) != 0 {
+		if ep.CAFile != "" {
+			return nil, errors.New("certificate pin and CA file are mutually exclusive")
+		}
+		if len(ep.CertSHA256) != sha256.Size {
+			return nil, errors.New("certificate pin must be a SHA-256 digest")
+		}
+		pin := ep.CertSHA256
+		// The standard verification is replaced by the pin check in
+		// VerifyConnection, which crypto/tls calls even when
+		// InsecureSkipVerify is set. A connection is accepted only if the
+		// leaf certificate matches the pin exactly.
+		cfg.InsecureSkipVerify = true
+		cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("upstream presented no certificate")
+			}
+			sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
+			if subtle.ConstantTimeCompare(sum[:], pin) != 1 {
+				return fmt.Errorf("upstream certificate does not match remote_tls_cert_sha256 (server presented %s)", FormatFingerprint(sum[:]))
+			}
+			return nil
+		}
+		return cfg, nil
+	}
 	if ep.CAFile != "" {
 		pem, err := os.ReadFile(ep.CAFile)
 		if err != nil {
@@ -170,6 +203,14 @@ func (c *Conn) readGreeting() error {
 }
 
 func (c *Conn) startTLS(ep Endpoint) error {
+	cfg, err := tlsConfig(ep)
+	if err != nil {
+		return err
+	}
+	return c.startTLSWith(cfg)
+}
+
+func (c *Conn) startTLSWith(cfg *tls.Config) error {
 	tag := c.NextTag()
 	if _, err := fmt.Fprintf(c.nc, "%s STARTTLS\r\n", tag); err != nil {
 		return err
@@ -187,13 +228,16 @@ func (c *Conn) startTLS(ep Endpoint) error {
 	if c.r.Buffered() != 0 {
 		return errors.New("starttls: unexpected plaintext data after OK")
 	}
-	cfg, err := tlsConfig(ep)
-	if err != nil {
-		return err
+	if err := c.handshake(cfg); err != nil {
+		return fmt.Errorf("starttls %w", err)
 	}
+	return nil
+}
+
+func (c *Conn) handshake(cfg *tls.Config) error {
 	tc := tls.Client(c.nc, cfg)
 	if err := tc.Handshake(); err != nil {
-		return fmt.Errorf("starttls handshake: %w", err)
+		return fmt.Errorf("handshake: %w", err)
 	}
 	c.nc = tc
 	c.r = bufio.NewReaderSize(tc, 64<<10)
@@ -430,4 +474,95 @@ func (c *Conn) Logout() {
 	_ = c.nc.SetDeadline(time.Now().Add(5 * time.Second))
 	fmt.Fprintf(c.nc, "%s LOGOUT\r\n", c.NextTag())
 	c.nc.Close()
+}
+
+// FormatFingerprint formats a digest like "openssl x509 -fingerprint":
+// upper-case hex bytes separated by colons.
+func FormatFingerprint(sum []byte) string {
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":")
+}
+
+// ParseFingerprint parses a SHA-256 fingerprint in hex, with or without
+// colons, in either case.
+func ParseFingerprint(s string) ([]byte, error) {
+	b, err := hex.DecodeString(strings.ReplaceAll(strings.TrimSpace(s), ":", ""))
+	if err != nil || len(b) != sha256.Size {
+		return nil, errors.New("must be a SHA-256 fingerprint (64 hex digits, colons optional)")
+	}
+	return b, nil
+}
+
+// CertificateInfo is the result of ProbeCertificate.
+type CertificateInfo struct {
+	Chain []*x509.Certificate // as presented by the server, leaf first
+	// VerifyErr is the result of the verification the proxy would do
+	// without a pin (system roots or CAFile, host name, validity).
+	VerifyErr error
+}
+
+// ProbeCertificate connects to the server, performs the TLS handshake
+// (after STARTTLS if configured) and returns the presented certificates
+// without trusting them. No credentials are sent. It is used by the
+// upstream-cert subcommand to obtain a fingerprint for pinning; the
+// fingerprint must be compared with the server's actual certificate
+// through another channel before it is pinned.
+func ProbeCertificate(ctx context.Context, ep Endpoint) (*CertificateInfo, error) {
+	verifyEp := ep
+	verifyEp.CertSHA256 = nil
+	verifyCfg, err := tlsConfig(verifyEp)
+	if err != nil {
+		return nil, err
+	}
+	info := &CertificateInfo{}
+	cfg := &tls.Config{
+		ServerName:         verifyCfg.ServerName,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, // only to read the certificates; nothing is sent
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			info.Chain = cs.PeerCertificates
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("upstream presented no certificate")
+			}
+			opts := x509.VerifyOptions{
+				DNSName:       verifyCfg.ServerName,
+				Roots:         verifyCfg.RootCAs,
+				Intermediates: x509.NewCertPool(),
+			}
+			for _, c := range cs.PeerCertificates[1:] {
+				opts.Intermediates.AddCert(c)
+			}
+			_, info.VerifyErr = cs.PeerCertificates[0].Verify(opts)
+			return nil
+		},
+	}
+
+	addr := net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port))
+	d := net.Dialer{Timeout: DialTimeout}
+	nc, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", addr, err)
+	}
+	c := &Conn{nc: nc, r: bufio.NewReaderSize(nc, 64<<10)}
+	defer func() { c.nc.Close() }()
+	_ = nc.SetDeadline(time.Now().Add(DialTimeout * 2))
+	switch ep.Security {
+	case SecurityTLS:
+		if err := c.handshake(cfg); err != nil {
+			return nil, fmt.Errorf("tls %w", err)
+		}
+	case SecurityStartTLS:
+		if err := c.readGreeting(); err != nil {
+			return nil, err
+		}
+		if err := c.startTLSWith(cfg); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("security %q does not use TLS", ep.Security)
+	}
+	return info, nil
 }

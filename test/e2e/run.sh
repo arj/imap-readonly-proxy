@@ -6,12 +6,18 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 DV_VERSION="${IRP_DOVECOT_VERSION:-$(dovecot --version | grep -oE "^[0-9]+\.[0-9]+\.[0-9]+")}"
 PORT="${IRP_E2E_PORT:-10143}"
+TLS_PORT="${IRP_E2E_TLS_PORT:-10993}"
 WORK="$(mktemp -d)"
 U="$(id -un)"
 G="$(id -gn)"
 trap 'kill "$(cat "$WORK/run/master.pid" 2>/dev/null)" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
-mkdir -p "$WORK"/{run,state,home}
+mkdir -p "$WORK"/{run,state,home,tls}
+# Self-signed upstream certificate (only valid for "localhost") for the
+# upstream TLS verification and pinning tests.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+  -keyout "$WORK/tls/key.pem" -out "$WORK/tls/cert.pem" 2>/dev/null
 cat >"$WORK/dovecot.conf" <<EOF
 dovecot_config_version = $DV_VERSION
 dovecot_storage_version = $DV_VERSION
@@ -23,7 +29,9 @@ default_internal_group = $G
 default_login_user = $U
 protocols = imap
 listen = 127.0.0.1
-ssl = no
+ssl = yes
+ssl_server_cert_file = $WORK/tls/cert.pem
+ssl_server_key_file = $WORK/tls/key.pem
 auth_allow_cleartext = yes
 mail_driver = maildir
 mail_path = $WORK/mail/%{user}
@@ -44,7 +52,7 @@ service imap-login {
     port = $PORT
   }
   inet_listener imaps {
-    port = 0
+    port = $TLS_PORT
   }
 }
 service anvil {
@@ -94,5 +102,6 @@ for _ in $(seq 50); do
   sleep 0.1
 done
 
-IRP_UPSTREAM_PORT="$PORT" IRP_UPSTREAM_USER=alice IRP_UPSTREAM_PASS=alicepw \
+IRP_UPSTREAM_PORT="$PORT" IRP_UPSTREAM_TLS_PORT="$TLS_PORT" IRP_UPSTREAM_CERT="$WORK/tls/cert.pem" \
+IRP_UPSTREAM_USER=alice IRP_UPSTREAM_PASS=alicepw \
   go test -tags e2e -count=1 "$@" ./test/e2e/
