@@ -27,7 +27,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=$GOARCH go build -trimpath -buildvcs=false \
 	-ldflags "-s -w -X main.version=$VERSION" -o "$ROOT/usr/bin/$PKG" ./cmd/$PKG
 
 install -m 0644 packaging/$PKG.service "$ROOT/lib/systemd/system/$PKG.service"
-install -m 0644 config.example.toml README.md SECURITY.md "$ROOT/usr/share/doc/$PKG/"
+install -m 0644 config.example.toml README.md SECURITY.md docs/openapi.yaml "$ROOT/usr/share/doc/$PKG/"
 install -m 0644 LICENSE "$ROOT/usr/share/doc/$PKG/copyright"
 for s in postinst prerm postrm; do
 	install -m 0755 packaging/debian/$s "$ROOT/DEBIAN/$s"

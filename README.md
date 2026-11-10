@@ -59,6 +59,12 @@ Each REST request is translated into IMAP commands and checked by the same
 policy as IMAP clients. The API can therefore never write, set `\Seen` or
 open hidden folders. See [ADR 0002](docs/adr/0002-rest-api.md).
 
+The full API description is in OpenAPI 3.1 format at
+[docs/openapi.yaml](docs/openapi.yaml) (installed by the Debian package as
+`/usr/share/doc/imap-readonly-proxy/openapi.yaml`). It can be opened with
+any OpenAPI viewer or used to generate clients. A unit test checks that it
+lists exactly the routes the server implements.
+
 Create a token, add the printed `api_token_sha256` line to the account, and
 give the token to the client:
 

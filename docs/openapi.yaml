@@ -1,0 +1,428 @@
+openapi: 3.1.0
+info:
+  title: imap-readonly-proxy REST API
+  version: 1.0.0
+  summary: Read-only HTTPS access to mailboxes behind imap-readonly-proxy.
+  description: |
+    Every request is translated into IMAP commands and checked by the same
+    allowlist policy as IMAP clients: mailboxes are opened with EXAMINE and
+    messages are fetched with BODY.PEEK, so the API cannot modify the
+    mailbox or set the `\Seen` flag. Hidden folders behave as if they did
+    not exist (404).
+
+    Only `GET` (and `HEAD`) are supported. Any other method returns 405.
+
+    Mailbox names are UTF-8 and must be percent-encoded in the path,
+    including the hierarchy delimiter (for example `Archive%2F2026`).
+
+    Every response carries `Cache-Control: no-store`,
+    `X-Content-Type-Options: nosniff`, a restrictive
+    `Content-Security-Policy` and `Referrer-Policy: no-referrer`; with TLS
+    also `Strict-Transport-Security`.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://imap-proxy.example.org:8443
+    description: Example; use the `[http] listen` address from your configuration.
+security:
+  - bearerToken: []
+tags:
+  - name: health
+    description: Liveness of the proxy.
+  - name: mailboxes
+    description: Visible mailboxes and their status.
+  - name: messages
+    description: Message search, decoded messages, raw messages and attachments.
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Liveness check
+      description: Does not require authentication and does not contact the upstream server.
+      security: []
+      responses:
+        "200":
+          description: The proxy is running.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+  /api/v1/mailboxes:
+    get:
+      tags: [mailboxes]
+      operationId: listMailboxes
+      summary: List visible mailboxes
+      description: |
+        Returns all mailboxes the account may see. Mailboxes whose name is
+        not canonical modified UTF-7 on the server are omitted.
+      responses:
+        "200":
+          description: Mailbox list.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [mailboxes]
+                properties:
+                  mailboxes:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Mailbox"
+              example:
+                mailboxes:
+                  - { name: INBOX, delimiter: /, flags: ["\\HasNoChildren"] }
+                  - { name: Reports, delimiter: /, flags: ["\\HasNoChildren"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/v1/mailboxes/{mailbox}:
+    parameters:
+      - $ref: "#/components/parameters/Mailbox"
+    get:
+      tags: [mailboxes]
+      operationId: getMailboxStatus
+      summary: Mailbox status
+      responses:
+        "200":
+          description: |
+            Status counters. A counter is omitted if the upstream server
+            does not report it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MailboxStatus"
+              example: { name: INBOX, messages: 3, unseen: 1, uidnext: 4, uidvalidity: 1794340000 }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/v1/mailboxes/{mailbox}/messages:
+    parameters:
+      - $ref: "#/components/parameters/Mailbox"
+    get:
+      tags: [messages]
+      operationId: listMessages
+      summary: Search and list messages
+      description: |
+        Returns message summaries, newest (highest UID) first. All filters
+        are combined with AND; without filters all messages match. Each
+        parameter may be given at most once; unknown parameters return 400.
+
+        Pagination: pass `next_before_uid` of a page as `before_uid` to get
+        the next (older) page. `null` means there are no more pages. UIDs
+        are only stable while `uidvalidity` stays the same.
+      parameters:
+        - { name: from, in: query, schema: { $ref: "#/components/schemas/SearchString" }, description: Substring of the From header. }
+        - { name: to, in: query, schema: { $ref: "#/components/schemas/SearchString" }, description: Substring of the To header. }
+        - { name: cc, in: query, schema: { $ref: "#/components/schemas/SearchString" }, description: Substring of the Cc header. }
+        - { name: subject, in: query, schema: { $ref: "#/components/schemas/SearchString" }, description: Substring of the subject. }
+        - { name: body, in: query, schema: { $ref: "#/components/schemas/SearchString" }, description: Substring of the body. }
+        - { name: text, in: query, schema: { $ref: "#/components/schemas/SearchString" }, description: Substring of headers or body. }
+        - { name: since, in: query, schema: { type: string, format: date }, description: "Internal date on or after this day (IMAP SINCE)." }
+        - { name: before, in: query, schema: { type: string, format: date }, description: "Internal date before this day (IMAP BEFORE)." }
+        - { name: "on", in: query, schema: { type: string, format: date }, description: "Internal date on this day (IMAP ON)." }
+        - name: unseen
+          in: query
+          description: "`true`: only unread messages; `false`: only read messages."
+          schema: { type: boolean }
+        - name: flagged
+          in: query
+          description: "`true`: only flagged messages; `false`: only unflagged messages."
+          schema: { type: boolean }
+        - name: limit
+          in: query
+          description: Page size.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: before_uid
+          in: query
+          description: Only messages with a UID lower than this value.
+          schema: { type: integer, minimum: 1, maximum: 4294967295 }
+      responses:
+        "200":
+          description: One page of message summaries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageList"
+              example:
+                mailbox: INBOX
+                uidvalidity: 1794340000
+                total: 3
+                messages:
+                  - uid: 3
+                    flags: []
+                    internal_date: "2026-11-09T10:00:00+01:00"
+                    size: 245
+                    subject: Message 3 Grüße
+                    from: [{ address: a@example.com }]
+                    to: [{ address: b@example.com }]
+                    date: "2026-11-09T10:00:00+01:00"
+                    message_id: "<m3@example.com>"
+                next_before_uid: 3
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/v1/mailboxes/{mailbox}/messages/{uid}:
+    parameters:
+      - $ref: "#/components/parameters/Mailbox"
+      - $ref: "#/components/parameters/UID"
+    get:
+      tags: [messages]
+      operationId: getMessage
+      summary: Decoded message
+      description: |
+        Returns the headers, the text and HTML bodies (decoded to UTF-8)
+        and the list of attachments. The HTML is returned as-is from the
+        message; sanitize it before rendering.
+      responses:
+        "200":
+          description: Decoded message.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageDetail"
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422":
+          description: The message cannot be parsed as MIME; use the `/raw` endpoint.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/v1/mailboxes/{mailbox}/messages/{uid}/raw:
+    parameters:
+      - $ref: "#/components/parameters/Mailbox"
+      - $ref: "#/components/parameters/UID"
+    get:
+      tags: [messages]
+      operationId: getRawMessage
+      summary: Original message
+      description: The complete message as stored on the server (RFC 5322), served as a download.
+      responses:
+        "200":
+          description: Raw message.
+          headers:
+            Content-Disposition:
+              schema: { type: string, example: 'attachment; filename="3.eml"' }
+          content:
+            message/rfc822:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+  /api/v1/mailboxes/{mailbox}/messages/{uid}/attachments/{index}:
+    parameters:
+      - $ref: "#/components/parameters/Mailbox"
+      - $ref: "#/components/parameters/UID"
+      - name: index
+        in: path
+        required: true
+        description: "`index` of the attachment in the `attachments` list of the decoded message."
+        schema: { type: integer, minimum: 0, maximum: 500 }
+    get:
+      tags: [messages]
+      operationId: getAttachment
+      summary: Decoded attachment
+      description: |
+        The attachment after transfer decoding. It is always served as
+        `application/octet-stream` so that browsers do not render it; the
+        declared type is in `X-Original-Content-Type`.
+      responses:
+        "200":
+          description: Attachment content.
+          headers:
+            Content-Disposition:
+              schema: { type: string, example: 'attachment; filename=bericht.pdf' }
+            X-Original-Content-Type:
+              description: Content type declared in the message (untrusted).
+              schema: { type: string, example: application/pdf }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/TooLarge" }
+        "422":
+          description: The message cannot be parsed as MIME; use the `/raw` endpoint.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+components:
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: |
+        Token created with `imap-readonly-proxy generate-token`; its
+        SHA-256 is stored as `api_token_sha256` in the account. After 10
+        failed attempts from one IP address, requests from that address
+        get 429 for a while.
+  parameters:
+    Mailbox:
+      name: mailbox
+      in: path
+      required: true
+      description: UTF-8 mailbox name, percent-encoded (including `/`). At most 255 bytes, no control characters.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+      example: INBOX
+    UID:
+      name: uid
+      in: path
+      required: true
+      description: IMAP UID of the message (decimal, no leading zeros).
+      schema: { type: integer, minimum: 1, maximum: 4294967295 }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    SearchString:
+      type: string
+      minLength: 1
+      maxLength: 1000
+      description: UTF-8 substring, no control characters. Matching is done by the upstream server.
+    Mailbox:
+      type: object
+      required: [name, flags]
+      properties:
+        name: { type: string, description: UTF-8 name; percent-encode it for use in paths. }
+        delimiter: { type: string, description: "Hierarchy delimiter; omitted if the server has none." }
+        flags:
+          type: array
+          items: { type: string }
+          description: IMAP mailbox attributes such as `\HasChildren` or `\Sent`.
+    MailboxStatus:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        messages: { type: integer }
+        unseen: { type: integer }
+        uidnext: { type: integer }
+        uidvalidity: { type: integer }
+    Address:
+      type: object
+      properties:
+        name: { type: string }
+        address: { type: string }
+    Envelope:
+      type: object
+      required: [subject]
+      properties:
+        subject: { type: string, description: Decoded subject; empty if missing. }
+        from: { type: array, items: { $ref: "#/components/schemas/Address" } }
+        to: { type: array, items: { $ref: "#/components/schemas/Address" } }
+        cc: { type: array, items: { $ref: "#/components/schemas/Address" } }
+        reply_to: { type: array, items: { $ref: "#/components/schemas/Address" } }
+        date:
+          type: string
+          description: Date header in RFC 3339 if it can be parsed, otherwise the decoded raw value.
+        message_id: { type: string }
+        in_reply_to: { type: string }
+    MessageMeta:
+      type: object
+      required: [uid, flags, size]
+      properties:
+        uid: { type: integer, minimum: 1, maximum: 4294967295 }
+        flags:
+          type: array
+          items: { type: string }
+          description: IMAP flags such as `\Seen` or `\Flagged`.
+        internal_date: { type: string, format: date-time, description: Time the server received the message. }
+        size: { type: integer, description: Size of the raw message in bytes. }
+    MessageSummary:
+      allOf:
+        - $ref: "#/components/schemas/MessageMeta"
+        - $ref: "#/components/schemas/Envelope"
+    MessageList:
+      type: object
+      required: [mailbox, uidvalidity, total, messages, next_before_uid]
+      properties:
+        mailbox: { type: string }
+        uidvalidity: { type: integer }
+        total: { type: integer, description: Number of matching messages before pagination. }
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/MessageSummary" }
+        next_before_uid:
+          type: [integer, "null"]
+          description: Value for `before_uid` to get the next page; `null` on the last page.
+    Attachment:
+      type: object
+      required: [index, content_type, size]
+      properties:
+        index: { type: integer, minimum: 0 }
+        filename: { type: string }
+        content_type: { type: string }
+        size: { type: integer, description: Decoded size in bytes. }
+        inline: { type: boolean, description: "True for `Content-Disposition: inline` parts." }
+        content_id: { type: string }
+    MessageDetail:
+      allOf:
+        - $ref: "#/components/schemas/MessageMeta"
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [text, html, attachments]
+          properties:
+            text: { type: string, description: Plain-text body; empty if none. }
+            html: { type: string, description: "HTML body (unsanitized); empty if none." }
+            attachments:
+              type: array
+              items: { $ref: "#/components/schemas/Attachment" }
+  responses:
+    BadRequest:
+      description: Invalid path or query parameter, or a request the policy does not allow.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Missing or wrong bearer token.
+      headers:
+        WWW-Authenticate:
+          schema: { type: string, example: 'Bearer realm="imap-readonly-proxy"' }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Unknown or hidden mailbox, or unknown message or attachment.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooLarge:
+      description: Message larger than `max_message_bytes`, or upstream response too large.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: Too many failed authentication attempts or concurrent requests from this IP address.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadGateway:
+      description: Upstream server unavailable or returned an error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
