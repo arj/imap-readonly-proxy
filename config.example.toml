@@ -1,8 +1,13 @@
 # imap-readonly-proxy example configuration.
-# Keep this file private (chmod 600): it contains upstream credentials.
+# Keep this file private: it contains upstream credentials. With the Debian
+# package use mode 0640, owner root, group imap-readonly-proxy; otherwise 0600.
 
 [server]
 # Implicit TLS (IMAPS) for clients. Recommended.
+# tls_cert/tls_key are the proxy's OWN server certificate and private key,
+# presented to IMAP clients. They do not authenticate anyone, and they are
+# not used for the upstream connection. The certificate name must match the
+# hostname clients connect to. See "TLS certificates" in the README.
 listen   = "0.0.0.0:993"
 tls_cert = "/etc/imap-readonly-proxy/cert.pem"
 tls_key  = "/etc/imap-readonly-proxy/key.pem"
@@ -20,10 +25,12 @@ local_user          = "reader"
 local_password_hash = "$2a$12$REPLACE_WITH_BCRYPT_HASH"
 
 remote_host     = "imap.example.org"
+# Upstream connection: the proxy verifies the server's certificate (system
+# CAs, or remote_ca_file) and logs in with remote_user/remote_password.
 remote_security = "tls"            # tls (993) | starttls (143) | insecure-plaintext (loopback only)
 # remote_port   = 993
 # remote_tls_server_name = "imap.example.org"
-# remote_ca_file = "/etc/ssl/private-ca.pem"
+# remote_ca_file = "/etc/ssl/private-ca.pem"  # only to verify the upstream server
 remote_user          = "me@example.org"
 remote_password_file = "/etc/imap-readonly-proxy/remote-password"
 

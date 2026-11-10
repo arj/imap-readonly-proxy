@@ -46,11 +46,87 @@ cp config.example.toml config.toml && chmod 600 config.toml   # then edit
 Configuration (see [config.example.toml](config.example.toml)):
 
 - Unknown keys are rejected.
-- The client listener needs `tls_cert`/`tls_key` (implicit TLS). Plaintext
-  is only allowed on a loopback address.
+- The client listener needs `tls_cert`/`tls_key` (implicit TLS). This is
+  the proxy's own server certificate; see [TLS certificates](#tls-certificates).
+  Plaintext is only allowed on a loopback address.
 - Upstream connections use `tls` or `starttls`, with certificate
   verification. `insecure-plaintext` is only allowed for a loopback upstream.
 - The upstream password can be read from `remote_password_file`.
+
+## TLS certificates
+
+There are two TLS connections:
+
+| Connection | Configured by | Purpose |
+|---|---|---|
+| Client to proxy | `[server]` `tls_cert`, `tls_key` | The proxy's own server certificate and private key, presented to IMAP clients (like any IMAPS server on port 993). |
+| Proxy to upstream | `remote_security`, optional `remote_ca_file`, `remote_tls_server_name` | Verifies the upstream server's certificate. The proxy presents no certificate upstream. |
+
+The certificate is not used to authenticate anyone, and the proxy does not
+ask clients for certificates. Authentication is by password on both sides:
+
+- Clients log in to the proxy with `local_user` and the password matching
+  `local_password_hash`.
+- The proxy logs in upstream with `remote_user` and `remote_password` (or
+  `remote_password_file`).
+
+The certificate's name must match the hostname clients connect to. The
+certificate file may contain the full chain (leaf first). The key must not
+be encrypted. The files are read at startup, so restart the service after
+replacing them.
+
+### Option 1: Let's Encrypt (public hostname)
+
+Use this if clients connect via a DNS name that resolves to the proxy and
+port 80 is reachable from the internet during issuance and renewal.
+
+```sh
+sudo apt install certbot
+sudo tee /usr/local/sbin/imap-readonly-proxy-cert-hook >/dev/null <<'HOOK'
+#!/bin/sh
+set -e
+install -m 0640 -g imap-readonly-proxy "$RENEWED_LINEAGE/fullchain.pem" /etc/imap-readonly-proxy/cert.pem
+install -m 0640 -g imap-readonly-proxy "$RENEWED_LINEAGE/privkey.pem"   /etc/imap-readonly-proxy/key.pem
+systemctl restart imap-readonly-proxy
+HOOK
+sudo chmod 0755 /usr/local/sbin/imap-readonly-proxy-cert-hook
+sudo certbot certonly --standalone -d imap-proxy.example.org \
+  --deploy-hook /usr/local/sbin/imap-readonly-proxy-cert-hook
+```
+
+certbot stores the hook in the certificate's renewal configuration and runs
+it after each renewal. The hook copies the files because
+`/etc/letsencrypt/live` is not readable by the service user. A restart
+closes open client connections, and clients reconnect. If port 80 is not
+available, use a DNS challenge plugin for your DNS provider instead of
+`--standalone`.
+
+### Option 2: self-signed (LAN, single host, testing)
+
+```sh
+sudo openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -days 825 -subj "/CN=imap-proxy.lan" \
+  -addext "subjectAltName=DNS:imap-proxy.lan,IP:192.168.1.10" \
+  -keyout /etc/imap-readonly-proxy/key.pem -out /etc/imap-readonly-proxy/cert.pem
+sudo chgrp imap-readonly-proxy /etc/imap-readonly-proxy/key.pem /etc/imap-readonly-proxy/cert.pem
+sudo chmod 0640 /etc/imap-readonly-proxy/key.pem /etc/imap-readonly-proxy/cert.pem
+```
+
+Replace the name and IP in `subjectAltName` with the ones clients use.
+Clients will not trust this certificate by default. Import `cert.pem` as a
+trusted certificate in each client, or pass it as the CA file, for example
+`openssl s_client -connect imap-proxy.lan:993 -CAfile cert.pem`. Do not
+disable certificate verification in clients, because that removes the
+protection against interception. The certificate expires after 825 days,
+so create a new one before then. For several hosts, a small private CA
+(for example with `step-ca` or `mkcert`) is easier to manage than
+individual self-signed certificates.
+
+### Proxy only reachable from the same host
+
+If the proxy and its clients run on the same machine, you can skip the
+certificate. Set `listen = "127.0.0.1:1143"` and `insecure_plaintext = true`.
+Plaintext is rejected for any address other than loopback.
 
 ## Debian package
 
