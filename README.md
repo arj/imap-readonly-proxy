@@ -52,6 +52,37 @@ Configuration (see [config.example.toml](config.example.toml)):
   verification. `insecure-plaintext` is only allowed for a loopback upstream.
 - The upstream password can be read from `remote_password_file`.
 
+## Debian package
+
+Pushing a tag of the form `vX.Y.Z` runs the tests and creates a GitHub
+release with `.deb` packages for amd64, arm64 and armhf, plus `SHA256SUMS`.
+To build a package locally, run `./packaging/build-deb.sh X.Y.Z amd64`.
+
+The package installs:
+
+- `/usr/bin/imap-readonly-proxy`
+- a hardened systemd unit, `imap-readonly-proxy.service`
+- a system user, `imap-readonly-proxy`
+- the directory `/etc/imap-readonly-proxy` (mode `0750`, group
+  `imap-readonly-proxy`)
+
+The service is enabled on install, but only starts once a configuration
+exists:
+
+```sh
+sudo apt install ./imap-readonly-proxy_X.Y.Z_amd64.deb
+sudo install -m 0640 -g imap-readonly-proxy \
+  /usr/share/doc/imap-readonly-proxy/config.example.toml \
+  /etc/imap-readonly-proxy/config.toml          # then edit
+sudo systemctl start imap-readonly-proxy
+journalctl -u imap-readonly-proxy
+```
+
+The TLS key, certificate and `remote_password_file` must be readable by the
+`imap-readonly-proxy` group. Place them in `/etc/imap-readonly-proxy`, for
+example. The unit can bind to port 993 without running as root.
+`apt purge` removes the configuration and the user.
+
 ## Hardening
 
 - Limits per command:

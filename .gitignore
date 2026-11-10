@@ -4,3 +4,4 @@ config.toml
 *.pem
 remote-password
 testdata/fuzz/
+/dist/

@@ -18,9 +18,16 @@ import (
 	"github.com/arj/imap-readonly-proxy/internal/proxy"
 )
 
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "hash-password" {
 		os.Exit(hashPassword())
+	}
+	if len(os.Args) > 1 && os.Args[1] == "version" {
+		fmt.Println(version)
+		return
 	}
 	cfgPath := flag.String("config", "config.toml", "path to the configuration file")
 	logLevel := flag.String("log-level", "info", "debug, info, warn or error")
@@ -38,8 +45,8 @@ func main() {
 		log.Error("cannot load configuration", "err", err)
 		os.Exit(1)
 	}
-	if fi, err := os.Stat(*cfgPath); err == nil && fi.Mode().Perm()&0o077 != 0 {
-		log.Warn("configuration file is readable by group or others; it contains upstream credentials", "mode", fi.Mode().Perm().String())
+	if fi, err := os.Stat(*cfgPath); err == nil && fi.Mode().Perm()&0o007 != 0 {
+		log.Warn("configuration file is accessible by others; it contains upstream credentials", "mode", fi.Mode().Perm().String())
 	}
 
 	srv := proxy.New(cfg, log, nil)
@@ -48,7 +55,7 @@ func main() {
 		log.Error("cannot listen", "err", err)
 		os.Exit(1)
 	}
-	log.Info("listening", "addr", ln.Addr().String(), "tls", !cfg.Server.InsecurePlaintext)
+	log.Info("listening", "version", version, "addr", ln.Addr().String(), "tls", !cfg.Server.InsecurePlaintext)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

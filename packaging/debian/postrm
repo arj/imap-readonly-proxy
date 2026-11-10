@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+if [ -d /run/systemd/system ]; then
+	if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+		systemctl disable imap-readonly-proxy.service >/dev/null 2>&1 || true
+		systemctl daemon-reload >/dev/null 2>&1 || true
+	fi
+fi
+if [ "$1" = "purge" ]; then
+	# Configuration contains credentials; remove it only on purge.
+	rm -rf /etc/imap-readonly-proxy
+	if getent passwd imap-readonly-proxy >/dev/null; then
+		deluser --system --quiet imap-readonly-proxy >/dev/null 2>&1 || true
+	fi
+fi
+exit 0

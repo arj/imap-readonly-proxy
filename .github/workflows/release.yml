@@ -1,0 +1,40 @@
+name: release
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+permissions:
+  contents: read
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: check tag format
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must be vX.Y.Z"; exit 1; }
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build packages
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for arch in amd64 arm64 armhf; do ./packaging/build-deb.sh "$VERSION" "$arch"; done
+          cd dist && sha256sum *.deb > SHA256SUMS
+      - name: inspect packages
+        run: for f in dist/*.deb; do dpkg-deb --info "$f"; dpkg-deb --contents "$f"; done
+      - name: smoke-test amd64 package
+        run: |
+          sudo apt-get install -y ./dist/imap-readonly-proxy_${GITHUB_REF_NAME#v}_amd64.deb
+          test "$(imap-readonly-proxy version)" = "${GITHUB_REF_NAME#v}"
+          systemd-analyze verify /lib/systemd/system/imap-readonly-proxy.service
+      - name: create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.deb dist/SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

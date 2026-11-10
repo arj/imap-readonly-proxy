@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+if [ "$1" = "configure" ]; then
+	if ! getent passwd imap-readonly-proxy >/dev/null; then
+		adduser --system --group --no-create-home --home /nonexistent \
+			--quiet imap-readonly-proxy
+	fi
+	chown root:imap-readonly-proxy /etc/imap-readonly-proxy
+	chmod 0750 /etc/imap-readonly-proxy
+	if [ -d /run/systemd/system ]; then
+		systemctl daemon-reload >/dev/null || true
+		if [ -z "$2" ]; then
+			systemctl enable imap-readonly-proxy.service >/dev/null || true
+		fi
+		systemctl try-restart imap-readonly-proxy.service >/dev/null || true
+	fi
+	if [ ! -e /etc/imap-readonly-proxy/config.toml ]; then
+		echo "imap-readonly-proxy: create /etc/imap-readonly-proxy/config.toml from" >&2
+		echo "  /usr/share/doc/imap-readonly-proxy/config.example.toml, then run" >&2
+		echo "  systemctl start imap-readonly-proxy" >&2
+	fi
+fi
+exit 0
