@@ -109,3 +109,7 @@ subscriptions, messages, flags) is unchanged.
 ## Security
 
 See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
